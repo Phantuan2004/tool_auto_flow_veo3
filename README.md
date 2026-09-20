@@ -1,0 +1,81 @@
+# GFlow Veo Batch Studio
+
+Ứng dụng Tkinter chạy lần lượt các phân cảnh qua [`gflow-cli`](https://github.com/ffroliva/gflow-cli). Mỗi batch tạo (hoặc dùng) **một Google Flow Project chung**. Với từng cảnh, app tạo **1 ảnh Nano Banana 2**, nhận `media UUID` của ảnh từ Flow và truyền UUID đó thẳng vào I2V để tạo **1 video Omni Flash, 8 giây** trong đúng project đó — không tải ảnh về rồi upload lại.
+
+> `gflow-cli` là công cụ không chính thức, đang ở giai đoạn alpha. Nó dùng phiên Google Flow của bạn; các lượt tạo có thể tiêu tốn credit và chịu điều khoản của Google Flow.
+
+## Yêu cầu
+
+- Python 3.10+ (Tkinter phải có sẵn; trên Windows bản cài từ python.org có mặc định).
+- Một tài khoản đã có quyền dùng Google Flow/Veo và credit phù hợp.
+- `gflow-cli` cài trong **cùng môi trường Python** dùng để chạy ứng dụng.
+
+## Cài đặt
+
+Mở PowerShell trong thư mục dự án rồi chạy:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+gflow --help
+```
+
+Ở lần chạy batch đầu tiên, ứng dụng tự kiểm tra profile. Nếu chưa có, nó chạy `gflow auth login` và mở cửa sổ trình duyệt; hãy đăng nhập tài khoản Google có quyền Google Flow/Veo, hoàn tất xác nhận trong trình duyệt, rồi chờ app tự tiếp tục. Bạn cũng có thể chủ động đăng nhập từ PowerShell:
+
+```powershell
+gflow auth login
+gflow auth status
+```
+
+Nút **Kiểm tra gflow** chỉ kiểm tra phiên bản CLI, không thực hiện đăng nhập.
+
+## Chạy ứng dụng
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python .\gflow_veo_batcher.py
+```
+
+1. Nhấn **Chọn tệp…**, chọn `scene_template.json` hoặc manifest của bạn.
+2. Chọn thư mục xuất, tỷ lệ (`16:9` hoặc `9:16`) và (nếu cần) Google Flow Project ID. Để trống Project ID nếu muốn app tự tạo một project Flow chung cho toàn batch.
+3. Nhấn **Chạy tất cả**. Project ID vừa tạo sẽ được điền lại trong giao diện. App chỉ lưu video hoàn tất tại `output/<scene-id>/video/`; ảnh là asset của Flow và được gắn trực tiếp bằng UUID.
+4. Theo dõi bảng trạng thái và khu vực nhật ký. Nút dừng kết thúc tiến trình đang chạy và không chạy cảnh kế tiếp.
+
+## Định dạng tệp cảnh
+
+Hỗ trợ JSON, JSONL/NDJSON, CSV/TSV, hoặc TXT (một prompt trên mỗi dòng). Các trường dùng được:
+
+| Trường | Bắt buộc | Mô tả |
+|---|---:|---|
+| `id` | Không | Tên cảnh/thư mục output. Mặc định `scene-001`... |
+| `prompt` | Có* | Prompt dùng cho cả bước ảnh và video. |
+| `image_prompt` | Có* | Prompt riêng khi tạo ảnh Nano Banana 2. |
+| `video_prompt` | Không | Prompt chuyển động riêng cho video; mặc định dùng `prompt` (hoặc `image_prompt`). |
+| `aspect` | Không | `16:9` hoặc `9:16`. |
+| `project` | Không | Google Flow Project ID cho cảnh đó. |
+
+*Một cảnh cần có ít nhất `prompt`, `image_prompt` hoặc `video_prompt`. Trong JSON, `defaults` cấp các giá trị chung; một cảnh có giá trị riêng sẽ ghi đè.
+
+CSV mẫu có header: `id,prompt,image_prompt,video_prompt,aspect,project`.
+
+## Lệnh mà app thực thi
+
+Mỗi cảnh được chạy theo thứ tự:
+
+```text
+gflow image t2i "IMAGE_PROMPT" --model nano2 --aspect 16:9 -n 1 --out output/scene-001/image
+gflow video i2v --initial-frame FLOW_IMAGE_MEDIA_UUID "VIDEO_PROMPT" --project FLOW_PROJECT_ID --model omni-flash --duration 8 --aspect 16:9 --count 1 --out-dir output/scene-001/video
+```
+
+`gflow-cli` 0.79.0 hiện không có cờ `--resolution`/`--quality` trên `gflow video i2v`, nên không thể tự động nhấn một lựa chọn “720p” riêng trong giao diện Flow. Video I2V native của Flow thường được trả về ở mức 720p (theo tỷ lệ `--aspect`); app không gửi một cờ độ phân giải không được CLI hỗ trợ. Nếu log JSON trả về video 360p, đó là giới hạn/cấu hình đang được Flow áp cho tài khoản — hãy kiểm tra model/tier và giao diện Flow trước khi chạy lại.
+
+CLI phát triển khá nhanh; khi một tham số bị bản `gflow-cli` đang cài từ chối, đọc log trong app, chạy `gflow video i2v --help`, rồi cập nhật `gflow-cli`. Mỗi cảnh chỉ được đánh dấu thành công nếu cả hai tiến trình `gflow` trả về mã 0 và ứng dụng tìm được ảnh mới để truyền vào bước video.
+
+## Lưu ý vận hành
+
+- Dùng thử 1 cảnh trước khi chạy hàng loạt để xác nhận đăng nhập, hạn mức ảnh, credit video và prompt.
+- Không đóng cửa sổ trình duyệt Flow mà CLI dùng trong khi một cảnh đang chạy.
+- App không tự retry để tránh tạo ảnh/video hoặc tiêu credit ngoài ý muốn. Cảnh lỗi có thể chạy lại bằng lần batch mới.
+- Trên Windows, một số bản `gflow-cli` lỗi `UnicodeEncodeError` khi `--out` chứa dấu tiếng Việt. App chạy CLI trong thư mục tạm ASCII rồi chép video hoàn tất về thư mục output bạn chọn, vì thế bạn vẫn có thể chọn đường dẫn tiếng Việt.

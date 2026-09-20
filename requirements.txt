@@ -1,0 +1,4 @@
+# Tkinter is included with the standard Python installer on Windows/macOS.
+# Install the generator CLI into the same environment as this app:
+gflow-cli>=0.73.0
+Pillow>=10.0.0

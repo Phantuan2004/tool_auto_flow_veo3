@@ -1,0 +1,17 @@
+{
+  "project_name": "Demo Veo Story",
+  "defaults": {
+    "aspect": "16:9"
+  },
+  "scenes": [
+    {
+      "id": "scene-001",
+      "image_prompt": "Cinematic establishing still of a sunrise over misty rice terraces in northern Vietnam, warm golden light, photorealistic, 16:9.",
+      "video_prompt": "Slow aerial push-in over the misty rice terraces. Warm golden sunrise light, natural ambience, stable cinematic motion."
+    },
+    {
+      "id": "scene-002",
+      "prompt": "Close-up of a Vietnamese coffee drip on a wooden table, steam rising, shallow depth of field, gentle camera movement."
+    }
+  ]
+}
