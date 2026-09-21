@@ -1,12 +1,13 @@
 # GFlow Veo Batch Studio
 
-Ứng dụng Tkinter chạy lần lượt các phân cảnh qua [`gflow-cli`](https://github.com/ffroliva/gflow-cli). Mỗi batch tạo (hoặc dùng) **một Google Flow Project chung**. Với từng cảnh, app tạo **1 ảnh Nano Banana 2**, nhận `media UUID` của ảnh từ Flow và truyền UUID đó thẳng vào I2V để tạo **1 video Omni Flash, 8 giây** trong đúng project đó — không tải ảnh về rồi upload lại.
+Ứng dụng PySide6 chạy lần lượt các phân cảnh qua [`gflow-cli`](https://github.com/ffroliva/gflow-cli). Mỗi batch tạo (hoặc dùng) **một Google Flow Project chung**. Với từng cảnh, app tạo **1 ảnh Nano Banana 2**, nhận `media UUID` của ảnh từ Flow và truyền UUID đó thẳng vào I2V để tạo **1 video Omni Flash, 8 giây** trong đúng project đó — không tải ảnh về rồi upload lại.
 
 > `gflow-cli` là công cụ không chính thức, đang ở giai đoạn alpha. Nó dùng phiên Google Flow của bạn; các lượt tạo có thể tiêu tốn credit và chịu điều khoản của Google Flow.
 
 ## Yêu cầu
 
-- Python 3.10+ (Tkinter phải có sẵn; trên Windows bản cài từ python.org có mặc định).
+- Python 3.10+.
+- PySide6 để chạy giao diện desktop.
 - Một tài khoản đã có quyền dùng Google Flow/Veo và credit phù hợp.
 - `gflow-cli` cài trong **cùng môi trường Python** dùng để chạy ứng dụng.
 
@@ -35,13 +36,17 @@ Nút **Kiểm tra gflow** chỉ kiểm tra phiên bản CLI, không thực hiệ
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-python .\gflow_veo_batcher.py
+python .\main.py
 ```
 
-1. Nhấn **Chọn tệp…**, chọn `scene_template.json` hoặc manifest của bạn.
-2. Chọn thư mục xuất, tỷ lệ (`16:9` hoặc `9:16`) và (nếu cần) Google Flow Project ID. Để trống Project ID nếu muốn app tự tạo một project Flow chung cho toàn batch.
-3. Nhấn **Chạy tất cả**. Project ID vừa tạo sẽ được điền lại trong giao diện. App chỉ lưu video hoàn tất tại `output/<scene-id>/video/`; ảnh là asset của Flow và được gắn trực tiếp bằng UUID.
-4. Theo dõi bảng trạng thái và khu vực nhật ký. Nút dừng kết thúc tiến trình đang chạy và không chạy cảnh kế tiếp.
+Giao diện mới chia thành hai cột:
+
+- Bên trái là **Media Gallery**, xem ảnh đã tạo, đường dẫn video và nút mở file theo scene.
+- Bên phải là **Batch Configuration**, chọn kịch bản/thư mục output, Project ID, tỷ lệ, danh sách scene và chỉnh prompt ảnh/video.
+- Thanh công cụ có nút kiểm tra `gflow`, tạo ảnh, tạo video và dừng tiến trình.
+- Dry-run được bật mặc định để kiểm tra luồng mà không tiêu credit.
+
+Không cần chạy trực tiếp `gflow_veo_batcher.py`; file đó giữ phần backend tương thích với phiên bản cũ.
 
 ## Định dạng tệp cảnh
 
@@ -53,19 +58,42 @@ Hỗ trợ JSON, JSONL/NDJSON, CSV/TSV, hoặc TXT (một prompt trên mỗi dò
 | `prompt` | Có* | Prompt dùng cho cả bước ảnh và video. |
 | `image_prompt` | Có* | Prompt riêng khi tạo ảnh Nano Banana 2. |
 | `video_prompt` | Không | Prompt chuyển động riêng cho video; mặc định dùng `prompt` (hoặc `image_prompt`). |
+| `references` | Không | Danh sách đường dẫn ảnh tham chiếu cho scene: nhân vật, đồ vật, bối cảnh... Tất cả ảnh được gửi cùng lúc khi tạo ảnh. |
 | `aspect` | Không | `16:9` hoặc `9:16`. |
 | `project` | Không | Google Flow Project ID cho cảnh đó. |
 
 *Một cảnh cần có ít nhất `prompt`, `image_prompt` hoặc `video_prompt`. Trong JSON, `defaults` cấp các giá trị chung; một cảnh có giá trị riêng sẽ ghi đè.
 
-CSV mẫu có header: `id,prompt,image_prompt,video_prompt,aspect,project`.
+CSV mẫu có header: `id,prompt,image_prompt,video_prompt,references,aspect,project`. Với CSV, nhiều ảnh tham chiếu có thể ngăn cách bằng dấu phẩy trong trường `references`; JSON nên dùng một mảng đường dẫn.
+
+Ví dụ JSON:
+
+```json
+{
+	"defaults": {"aspect": "16:9"},
+	"scenes": [
+		{
+			"id": "scene-001",
+			"image_prompt": "Minh đứng bên chiếc xe máy trong con hẻm lúc bình minh",
+			"video_prompt": "Slow dolly-in, Minh turns toward the camera",
+			"references": [
+				"assets/minh.png",
+				"assets/motorbike.png",
+				"assets/alley.png"
+			]
+		}
+	]
+}
+```
+
+Trong giao diện, chọn scene rồi nhấn **+ Thêm ảnh** để chọn nhiều ảnh tham chiếu một lần. Các ảnh được truyền vào lệnh tạo ảnh dưới dạng nhiều cờ `--ref`; nếu một file không tồn tại, scene sẽ lỗi trước khi gửi request để tránh tạo sai hình.
 
 ## Lệnh mà app thực thi
 
 Mỗi cảnh được chạy theo thứ tự:
 
 ```text
-gflow image t2i "IMAGE_PROMPT" --model nano2 --aspect 16:9 -n 1 --out output/scene-001/image
+gflow image t2i "IMAGE_PROMPT" --model nano2 --aspect 16:9 -n 1 --ref assets/minh.png --ref assets/motorbike.png --out output/scene-001/image
 gflow video i2v --initial-frame FLOW_IMAGE_MEDIA_UUID "VIDEO_PROMPT" --project FLOW_PROJECT_ID --model omni-flash --duration 8 --aspect 16:9 --count 1 --out-dir output/scene-001/video
 ```
 

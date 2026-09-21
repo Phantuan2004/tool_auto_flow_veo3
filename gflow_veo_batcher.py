@@ -57,6 +57,7 @@ class Scene:
     video_prompt: str
     aspect: str = ""
     project: str = ""
+    references: list[str] = field(default_factory=list)
     status: str = "Chờ tạo ảnh"
     image_output: str = ""
     video_output: str = ""
@@ -96,10 +97,16 @@ def read_scenes(path: Path) -> tuple[list[Scene], dict[str, Any]]:
         merged = {**defaults, **item}
         image_prompt = str(merged.get("image_prompt") or merged.get("prompt") or "").strip()
         video_prompt = str(merged.get("video_prompt") or merged.get("prompt") or image_prompt).strip()
+        references = merged.get("references", merged.get("reference_images", [])) or []
+        if isinstance(references, str):
+            references = [part.strip() for part in references.split(",") if part.strip()]
+        if not isinstance(references, list):
+            raise ValueError(f"Cảnh {index} có 'references' không phải danh sách ảnh.")
         scenes.append(Scene(
             id=str(merged.get("id") or f"scene-{index:03d}"), image_prompt=image_prompt, video_prompt=video_prompt,
             aspect=str(merged.get("aspect", "") or ""),
             project=str(merged.get("project", "") or ""),
+            references=[str((path.parent / str(value)).resolve()) for value in references if str(value).strip()],
         ))
     if not scenes:
         raise ValueError("Tệp không có cảnh nào.")
@@ -114,6 +121,11 @@ class GflowRunner:
     def image_command(self, scene: Scene, output_dir: Path, global_values: dict[str, str]) -> list[str]:
         executable = shutil.which("gflow") or "gflow"
         command = [executable, "image", "t2i", scene.image_prompt, "--model", "nano2", "--aspect", scene.aspect or global_values["aspect"], "-n", "1"]
+        for reference in scene.references:
+            reference_path = Path(reference).expanduser()
+            if not reference_path.is_file():
+                raise FileNotFoundError(f"Không tìm thấy ảnh tham chiếu: {reference_path}")
+            command += ["--ref", str(reference_path.resolve())]
         # The batch owns one Flow project, ensuring the generated UUID stays selectable.
         project = global_values["project"]
         if project:
