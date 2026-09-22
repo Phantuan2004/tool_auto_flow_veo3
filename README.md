@@ -32,6 +32,8 @@ gflow auth status
 
 Nút **Kiểm tra gflow** chỉ kiểm tra phiên bản CLI, không thực hiện đăng nhập.
 
+Nút **Đăng nhập Flow** luôn chạy `gflow auth login` và mở trình duyệt để bạn chọn hoặc chuyển sang tài khoản Google Flow/Veo khác. Có thể dùng nút này trước khi tạo batch; nếu chưa đăng nhập, bước tạo ảnh/video vẫn tự mở luồng đăng nhập như trước.
+
 ## Chạy ứng dụng
 
 ```powershell

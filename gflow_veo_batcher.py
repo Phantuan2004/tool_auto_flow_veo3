@@ -183,6 +183,14 @@ class GflowRunner:
         logged_in, error, _ = self.run_command([executable, "auth", "login"])
         return logged_in, error
 
+    def login(self) -> tuple[bool, str]:
+        """Always launch the official login flow so the user can choose an account."""
+        executable = shutil.which("gflow") or "gflow"
+        self.emit("INFO", "Đang mở trình duyệt để đăng nhập/chuyển tài khoản Google Flow…")
+        self.emit("INFO", "Trong cửa sổ trình duyệt, chọn tài khoản Flow/Veo muốn sử dụng rồi hoàn tất xác nhận.")
+        return_code, error, _ = self.run_command([executable, "auth", "login"])
+        return return_code, error
+
     def create_project(self, title: str) -> tuple[str | None, str]:
         ok, error, lines = self.run_command(self.project_command(title))
         result = json_from_cli(lines, "project_id")

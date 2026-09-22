@@ -152,6 +152,30 @@ class RunWorker(QObject):
         return scene.status in {"Ảnh đã tạo", "Thành công"}
 
 
+class AuthWorker(QObject):
+    log = Signal(str, str)
+    finished = Signal(bool, str)
+
+    def __init__(self):
+        super().__init__()
+        self.cancelled = False
+        self.runner: GflowRunner | None = None
+
+    @Slot()
+    def run(self):
+        self.runner = GflowRunner(self._emit_log, lambda: self.cancelled)
+        success, error = self.runner.login()
+        self.finished.emit(success, error)
+
+    def stop(self):
+        self.cancelled = True
+        if self.runner:
+            self.runner.cancel()
+
+    def _emit_log(self, level: str, message: str):
+        self.log.emit(level, message)
+
+
 class MediaPane(QFrame):
     def __init__(self):
         super().__init__()
@@ -231,6 +255,9 @@ class FlowStudio(QMainWindow):
         self.check_action = QAction("Kiểm tra gflow", self)
         self.check_action.triggered.connect(self.check_gflow)
         toolbar.addAction(self.check_action)
+        self.login_action = QAction("Đăng nhập Flow", self)
+        self.login_action.triggered.connect(self.login_flow)
+        toolbar.addAction(self.login_action)
         toolbar.addSeparator()
         self.run_images_action = QAction("Tạo ảnh", self)
         self.run_images_action.triggered.connect(lambda: self.start_run("image"))
@@ -407,6 +434,23 @@ class FlowStudio(QMainWindow):
         result = subprocess.run([shutil.which("gflow") or "gflow", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace")
         self.log_message("INFO" if result.returncode == 0 else "ERROR", (result.stdout or result.stderr).strip())
 
+    def login_flow(self):
+        if self.worker:
+            return
+        self.worker = AuthWorker()
+        self.thread = QThread(self)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.log.connect(self.log_message)
+        self.worker.finished.connect(self.login_finished)
+        self.worker.finished.connect(self.thread.quit)
+        self.thread.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.start()
+        self._set_actions_enabled(False)
+        self.stop_action.setEnabled(True)
+        self.status.showMessage("Đang chờ đăng nhập Google Flow...")
+
     def start_run(self, phase: str):
         if self.worker or not self.scenes:
             return
@@ -435,9 +479,8 @@ class FlowStudio(QMainWindow):
         self.thread.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
         self.thread.start()
+        self._set_actions_enabled(False)
         self.stop_action.setEnabled(True)
-        self.run_images_action.setEnabled(False)
-        self.run_videos_action.setEnabled(False)
         self.status.showMessage(f"Đang chạy pha {phase}...")
 
     def stop_run(self):
@@ -445,14 +488,32 @@ class FlowStudio(QMainWindow):
             self.worker.stop()
             self.status.showMessage("Đang dừng sau cảnh hiện tại...")
 
+    def _set_actions_enabled(self, enabled: bool):
+        self.check_action.setEnabled(enabled)
+        self.login_action.setEnabled(enabled)
+        self.run_images_action.setEnabled(enabled)
+        self.run_videos_action.setEnabled(enabled)
+
+    @Slot(bool, str)
+    def login_finished(self, success: bool, error: str):
+        if success:
+            self.log_message("INFO", "Đăng nhập Google Flow thành công.")
+            self.status.showMessage("Đã đăng nhập Google Flow")
+        else:
+            self.log_message("ERROR", error or "Đăng nhập Google Flow thất bại.")
+            self.status.showMessage("Đăng nhập thất bại")
+        self.worker = None
+        self.thread = None
+        self.stop_action.setEnabled(False)
+        self._set_actions_enabled(True)
+
     @Slot(str, int, int)
     def run_finished(self, phase: str, success: int, total: int):
         self.log_message("INFO", f"Hoàn tất {phase}: {success}/{total}")
         self.worker = None
         self.thread = None
         self.stop_action.setEnabled(False)
-        self.run_images_action.setEnabled(True)
-        self.run_videos_action.setEnabled(True)
+        self._set_actions_enabled(True)
         self.status.showMessage(f"Hoàn tất: {success}/{total} scene")
         self.refresh_all()
 
