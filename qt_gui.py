@@ -4,10 +4,11 @@ import queue
 import shutil
 import subprocess
 import threading
+import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QPixmap
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -55,10 +56,12 @@ class RunWorker(QObject):
 
     @Slot()
     def run(self):
-        self.runner = GflowRunner(self._emit_log, lambda: self.cancelled)
+        error_log = self.output / "_logs" / "gflow_errors.log"
+        self.runner = GflowRunner(self._emit_log, lambda: self.cancelled, error_log)
         ready, reason = self._authenticate(create_project=self.phase == "image")
         if not ready:
             self.log.emit("ERROR", reason)
+            self._write_error_log("ERROR", f"Batch {self.phase}: {reason}")
             self.finished.emit(self.phase, 0, len(self.indexes))
             return
         for index in self.indexes:
@@ -100,10 +103,20 @@ class RunWorker(QObject):
         scene = self.app.scenes[index]
         scene.status, scene.error = "Đang tạo ảnh", ""
         self.log.emit("INFO", f"{scene.id}: đang tạo ảnh")
+        self._write_error_log("INFO", f"{scene.id}: bắt đầu tạo ảnh")
         work_dir = Path(self.app.temp_dir(index, "image"))
         image_dir = work_dir / "image"
         image_dir.mkdir(parents=True, exist_ok=True)
-        ok, error, lines = self.runner.run_command(self.runner.image_command(scene, image_dir, self.values))
+        try:
+            command = self.runner.image_command(scene, image_dir, self.values)
+            ok, error, lines = self.runner.run_command(command)
+        except Exception as exc:
+            error = f"Lỗi nội bộ khi tạo ảnh: {exc}"
+            scene.status = "Lỗi"
+            self._write_error_log("ERROR", f"{scene.id}: {error}\n{traceback.format_exc()}")
+            scene.error = error
+            self.log.emit("ERROR", f"{scene.id}: {error}")
+            return
         from gflow_veo_batcher import json_from_cli
         result = json_from_cli(lines, "images")
         images = result.get("images", []) if result else []
@@ -119,6 +132,8 @@ class RunWorker(QObject):
         else:
             scene.status = "Đã dừng" if self.cancelled else "Lỗi"
         scene.error = error or ""
+        if scene.error:
+            self._write_error_log("ERROR", f"{scene.id}: {scene.error}")
         self.log.emit("INFO" if scene.status == "Ảnh đã tạo" else "ERROR", f"{scene.id}: {scene.status} {error}")
 
     def _run_video(self, index: int):
@@ -132,20 +147,44 @@ class RunWorker(QObject):
             shutil.copy2(scene.image_output, input_image)
         except OSError as exc:
             scene.status, scene.error = "Lỗi", str(exc)
+            self._write_error_log("ERROR", f"{scene.id}: không thể chuẩn bị ảnh video: {exc}")
             return
         self.log.emit("INFO", f"{scene.id}: dùng ảnh làm initial frame và tạo video")
-        ok, error, _ = self.runner.run_command(self.runner.video_command(scene, str(input_image), video_dir, self.values))
-        from gflow_veo_batcher import new_media_file, VIDEO_EXTENSIONS
+        try:
+            command = self.runner.video_command(scene, str(input_image), video_dir, self.values)
+            ok, error, _ = self.runner.run_command(command)
+        except Exception as exc:
+            error = f"Lỗi nội bộ khi tạo video: {exc}"
+            scene.status = "Lỗi"
+            self._write_error_log("ERROR", f"{scene.id}: {error}\n{traceback.format_exc()}")
+            scene.error = error
+            self.log.emit("ERROR", f"{scene.id}: {error}")
+            return
+        from gflow_veo_batcher import VIDEO_EXTENSIONS, faststart_video, is_valid_video_file, new_media_file
         video = new_media_file(video_dir, set(), VIDEO_EXTENSIONS) if ok else None
         if ok and video:
+            faststart_video(video, self._write_error_log)
             final_dir = self.output / scene.id / "video"
             shutil.copytree(video_dir, final_dir, dirs_exist_ok=True)
             scene.video_output, scene.status = str(final_dir / video.relative_to(video_dir)), "Thành công"
         else:
             scene.status = "Đã dừng" if self.cancelled else "Lỗi"
-            error = error or "Không tìm thấy video mới trong output."
+            error = error or "Không tìm thấy video hợp lệ trong output (file có thể chưa tải xong hoặc bị lỗi mã hóa)."
+            if ok:
+                invalid_files = [
+                    str(path) for path in video_dir.rglob("*")
+                    if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS and not is_valid_video_file(path)
+                ]
+                if invalid_files:
+                    error += " File không hợp lệ: " + ", ".join(invalid_files)
         scene.error = error or ""
+        if scene.error:
+            self._write_error_log("ERROR", f"{scene.id}: {scene.error}")
         self.log.emit("INFO" if scene.status == "Thành công" else "ERROR", f"{scene.id}: {scene.status} {error or ''}")
+
+    def _write_error_log(self, level: str, message: str):
+        if self.runner:
+            self.runner._write_error_log(level, message)
 
     @staticmethod
     def _is_success(scene: Scene) -> bool:
@@ -281,9 +320,12 @@ class FlowStudio(QMainWindow):
         root_layout.addWidget(splitter, 1)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
-        self.log.setMaximumHeight(150)
+        self.log.setMinimumHeight(220)
+        self.log.setMaximumHeight(360)
+        self.log.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.log.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.log.setPlaceholderText("Nhật ký thực thi sẽ xuất hiện ở đây...")
-        root_layout.addWidget(self.log)
+        root_layout.addWidget(self.log, 0)
         self.setCentralWidget(root)
         self.status = QStatusBar()
         self.setStatusBar(self.status)
@@ -308,8 +350,15 @@ class FlowStudio(QMainWindow):
         self.dry_run = QCheckBox("Dry-run (không tốn credit)")
         self.dry_run.setChecked(True)
         layout.addWidget(self.dry_run)
-        layout.addWidget(QLabel("Danh sách phân cảnh"), 0, Qt.AlignLeft)
+        self.scene_count = QLabel("Danh sách phân cảnh")
+        self.scene_count.setObjectName("sceneCount")
+        layout.addWidget(self.scene_count, 0, Qt.AlignLeft)
         self.scene_list = QListWidget()
+        self.scene_list.setMinimumHeight(300)
+        self.scene_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.scene_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scene_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scene_list.setWordWrap(True)
         self.scene_list.currentRowChanged.connect(self.select_scene)
         layout.addWidget(self.scene_list, 1)
         self.prompt_tabs = QTabWidget()
@@ -320,7 +369,17 @@ class FlowStudio(QMainWindow):
         layout.addWidget(self.prompt_tabs)
         layout.addWidget(QLabel("Ảnh tham chiếu (nhân vật, đồ vật, bối cảnh)"), 0, Qt.AlignLeft)
         self.reference_list = QListWidget()
-        self.reference_list.setMaximumHeight(120)
+        self.reference_list.setMaximumHeight(170)
+        self.reference_list.setViewMode(QListWidget.IconMode)
+        self.reference_list.setResizeMode(QListWidget.Adjust)
+        self.reference_list.setMovement(QListWidget.Static)
+        self.reference_list.setGridSize(QSize(96, 108))
+        self.reference_list.setIconSize(QSize(78, 78))
+        self.reference_list.setSpacing(2)
+        self.reference_list.setWrapping(True)
+        self.reference_list.setWordWrap(True)
+        self.reference_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.reference_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(self.reference_list)
         reference_buttons = QHBoxLayout()
         add_reference = QPushButton("+ Thêm ảnh")
@@ -353,11 +412,12 @@ class FlowStudio(QMainWindow):
             QToolButton:hover, QPushButton:hover { background: #315265; }
             QLineEdit, QPlainTextEdit, QListWidget { background: #0c121a; border: 1px solid #2b3a4c; border-radius: 6px; padding: 7px; color: #e7edf4; }
             QLabel#sectionTitle { color: #57d6a2; font-weight: 700; letter-spacing: 1px; padding-bottom: 6px; }
+            QLabel#sceneCount { color: #b8c8d8; font-weight: 650; padding-top: 6px; }
             QLabel#mediaTitle { font-size: 17pt; font-weight: 650; color: #ffffff; }
             QLabel#muted { color: #95a5b7; }
             QFrame#mediaPane, QFrame#configPane { background: #18212c; border: 1px solid #263647; border-radius: 10px; padding: 8px; }
             QLabel#imagePreview { background: #0b1118; border: 1px dashed #3a5068; border-radius: 8px; color: #75879a; }
-            QListWidget::item { padding: 9px; border-bottom: 1px solid #1f2c3a; }
+            QListWidget::item { padding: 10px; border-bottom: 1px solid #1f2c3a; }
             QListWidget::item:selected { background: #245d67; border-radius: 5px; }
             QTabBar::tab { background: #1c2937; color: #9fb0c2; padding: 8px 14px; }
             QTabBar::tab:selected { background: #2d5964; color: white; }
@@ -380,8 +440,9 @@ class FlowStudio(QMainWindow):
                 self.project_edit.setText(str(self.defaults["project"]))
             self.scene_list.clear()
             for scene in self.scenes:
-                item = QListWidgetItem(f"{scene.id}\n{scene.status}")
+                item = QListWidgetItem(self._scene_item_text(scene))
                 self.scene_list.addItem(item)
+            self.scene_count.setText(f"Danh sách phân cảnh ({len(self.scenes)})")
             if self.scenes:
                 self.scene_list.setCurrentRow(0)
             self.log_message("INFO", f"Đã nạp {len(self.scenes)} scene từ {Path(path).name}")
@@ -402,7 +463,7 @@ class FlowStudio(QMainWindow):
         self.video_prompt.setPlainText(scene.video_prompt)
         self.reference_list.clear()
         for reference in scene.references:
-            self.reference_list.addItem(reference)
+            self._add_reference_item(reference)
         self.media.show_scene(scene)
 
     def save_current_prompts(self):
@@ -410,8 +471,27 @@ class FlowStudio(QMainWindow):
         if index >= 0:
             self.scenes[index].image_prompt = self.image_prompt.toPlainText().strip()
             self.scenes[index].video_prompt = self.video_prompt.toPlainText().strip()
-            self.scenes[index].references = [self.reference_list.item(row).text() for row in range(self.reference_list.count())]
+            references = [
+                self.reference_list.item(row).data(Qt.UserRole) or self.reference_list.item(row).text()
+                for row in range(self.reference_list.count())
+            ]
+            for scene in self.scenes:
+                scene.references = references.copy()
             self.log_message("INFO", f"Đã cập nhật prompt cho {self.scenes[index].id}")
+
+    def _add_reference_item(self, path: str):
+        item = QListWidgetItem()
+        item.setData(Qt.UserRole, path)
+        item.setToolTip(path)
+        pixmap = QPixmap(path)
+        if not pixmap.isNull():
+            item.setIcon(QIcon(pixmap.scaled(72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            item.setText(Path(path).name[:16])
+            item.setSizeHint(QSize(92, 104))
+        else:
+            item.setText(f"[Không đọc được ảnh] {path}")
+            item.setSizeHint(QSize(92, 104))
+        self.reference_list.addItem(item)
 
     def add_references(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -421,8 +501,8 @@ class FlowStudio(QMainWindow):
             "Images (*.png *.jpg *.jpeg *.webp);;All files (*.*)",
         )
         for path in paths:
-            if not any(self.reference_list.item(row).text() == path for row in range(self.reference_list.count())):
-                self.reference_list.addItem(path)
+            if not any(self.reference_list.item(row).data(Qt.UserRole) == path for row in range(self.reference_list.count())):
+                self._add_reference_item(path)
         self.save_current_prompts()
 
     def remove_reference(self):
@@ -520,9 +600,16 @@ class FlowStudio(QMainWindow):
     def refresh_scene(self, index: int):
         if 0 <= index < self.scene_list.count():
             item = self.scene_list.item(index)
-            item.setText(f"{self.scenes[index].id}\n{self.scenes[index].status}")
+            item.setText(self._scene_item_text(self.scenes[index]))
             if index == self.scene_list.currentRow():
                 self.media.show_scene(self.scenes[index])
+
+    @staticmethod
+    def _scene_item_text(scene: Scene) -> str:
+        summary = " ".join(scene.image_prompt.split())
+        if len(summary) > 140:
+            summary = summary[:137].rstrip() + "..."
+        return f"{scene.id}  |  {scene.status}\n{summary}"
 
     def refresh_all(self):
         for index in range(len(self.scenes)):

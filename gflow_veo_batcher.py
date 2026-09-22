@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import queue
 import shutil
 import subprocess
@@ -27,12 +28,85 @@ APP_DIR = Path(__file__).resolve().parent
 SETTINGS_FILE = APP_DIR / "settings.json"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov"}
+MAX_I2I_REFERENCES = 10
 
 
 def new_media_file(folder: Path, before: set[Path], extensions: set[str]) -> Path | None:
     """Return the newest file created by one gflow command in its output folder."""
-    candidates = [p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in extensions and p not in before]
+    candidates = [
+        p for p in folder.rglob("*")
+        if p.is_file() and p.suffix.lower() in extensions and p not in before and is_valid_video_file(p)
+    ]
     return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+
+
+def is_valid_video_file(path: Path) -> bool:
+    """Reject incomplete downloads or HTML/JSON error files named as videos."""
+    try:
+        if path.stat().st_size < 1024:
+            return False
+        with path.open("rb") as handle:
+            header = handle.read(64)
+        if path.suffix.lower() == ".mp4":
+            return header[4:8] == b"ftyp" and _has_mp4_atoms(path, {b"moov", b"mdat"})
+        if path.suffix.lower() == ".webm":
+            return header.startswith(b"\x1a\x45\xdf\xa3")
+        return path.suffix.lower() == ".mov" and header[4:8] == b"ftyp" and _has_mp4_atoms(path, {b"moov", b"mdat"})
+    except OSError:
+        return False
+
+
+def _has_mp4_atoms(path: Path, required: set[bytes]) -> bool:
+    """Check top-level MP4 boxes without requiring an external media library."""
+    found: set[bytes] = set()
+    file_size = path.stat().st_size
+    with path.open("rb") as handle:
+        offset = 0
+        while offset + 8 <= file_size:
+            handle.seek(offset)
+            size_bytes = handle.read(4)
+            atom_type = handle.read(4)
+            if len(size_bytes) < 4 or len(atom_type) < 4:
+                break
+            size = int.from_bytes(size_bytes, "big")
+            header_size = 8
+            if size == 1:
+                size = int.from_bytes(handle.read(8), "big")
+                header_size = 16
+            elif size == 0:
+                size = file_size - offset
+            if size < header_size or offset + size > file_size:
+                break
+            found.add(atom_type)
+            if required.issubset(found):
+                return True
+            offset += size
+    return required.issubset(found)
+
+
+def faststart_video(path: Path, log: Callable[[str, str], None] | None = None) -> Path:
+    """Remux MP4/MOV with a front-loaded moov atom when ffmpeg is available."""
+    if path.suffix.lower() not in {".mp4", ".mov"}:
+        return path
+    executable = shutil.which("ffmpeg")
+    if not executable:
+        if log:
+            log("WARNING", "Không tìm thấy ffmpeg; giữ nguyên video gốc, chưa thể tối ưu metadata phát video.")
+        return path
+    repaired = path.with_name(path.stem + "_faststart" + path.suffix)
+    result = subprocess.run(
+        [executable, "-y", "-i", str(path), "-c", "copy", "-movflags", "+faststart", str(repaired)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if result.returncode == 0 and is_valid_video_file(repaired):
+        path.unlink()
+        repaired.replace(path)
+        if log:
+            log("INFO", f"Đã tối ưu metadata phát video: {path.name}")
+    elif log:
+        log("WARNING", f"ffmpeg không thể tối ưu video {path.name}: {(result.stderr or '').strip()[-500:]}")
+        repaired.unlink(missing_ok=True)
+    return path
 
 
 def json_from_cli(lines: list[str], required_key: str | None = None) -> dict[str, Any] | None:
@@ -65,6 +139,51 @@ class Scene:
     retry_selected: bool = False
 
 
+def _structured_text_scenes(text: str) -> list[dict[str, Any]]:
+    """Parse Markdown-like scene blocks headed by ``Phân cảnh N``."""
+    heading_pattern = re.compile(r"(?im)^\s*(?:#{1,6}\s*)?Phân\s+cảnh\s+([^\r\n]+)")
+    matches = list(heading_pattern.finditer(text))
+    if not matches:
+        return []
+
+    section_pattern = re.compile(r"(?im)^\s*\*\*([^*\r\n]+):\*\*[ \t]*([^\r\n]*)")
+    scenes: list[dict[str, Any]] = []
+    for index, match in enumerate(matches, 1):
+        block = text[match.end():matches[index].start() if index < len(matches) else len(text)].strip()
+        title = match.group(1).strip()
+        number_match = re.match(r"(\d+)", title)
+        scene_id = f"scene-{int(number_match.group(1)):03d}" if number_match else f"scene-{index:03d}"
+        sections: dict[str, str] = {}
+        section_matches = list(section_pattern.finditer(block))
+        intro = block[:section_matches[0].start()].strip() if section_matches else block
+        for section_index, section_match in enumerate(section_matches):
+            end = section_matches[section_index + 1].start() if section_index + 1 < len(section_matches) else len(block)
+            inline_content = section_match.group(2).strip()
+            following_content = block[section_match.end():end].strip()
+            sections[section_match.group(1).strip().lower()] = "\n".join(
+                part for part in (inline_content, following_content) if part
+            )
+
+        image_parts = [f"Phân cảnh {title}", intro]
+        for name in ("phong cách hình ảnh", "ánh sáng tổng thể", "bối cảnh", "trang phục và hành động nhân vật", "biểu cảm của từng nhân vật"):
+            if sections.get(name):
+                image_parts.append(f"{name}: {sections[name]}")
+        video_parts = image_parts[:]
+        for name in ("chỉ đạo quay & chuyển động", "lời thoại"):
+            if sections.get(name):
+                video_parts.append(f"{name}: {sections[name]}")
+        if sections.get("negative prompt"):
+            negative = f"Negative Prompt: {sections['negative prompt']}"
+            image_parts.append(negative)
+            video_parts.append(negative)
+        scenes.append({
+            "id": scene_id,
+            "image_prompt": "\n\n".join(part for part in image_parts if part),
+            "video_prompt": "\n\n".join(part for part in video_parts if part),
+        })
+    return scenes
+
+
 def read_scenes(path: Path) -> tuple[list[Scene], dict[str, Any]]:
     """Load JSON, JSONL, CSV, TSV, or a simple one-prompt-per-line text file."""
     suffix = path.suffix.lower()
@@ -75,12 +194,21 @@ def read_scenes(path: Path) -> tuple[list[Scene], dict[str, Any]]:
         if isinstance(payload, list):
             raw = payload
         elif isinstance(payload, dict):
-            raw = payload.get("scenes", [])
-            defaults = payload.get("defaults", {}) or {}
+            defaults_value = payload.get("defaults", {}) or {}
+            if not isinstance(defaults_value, dict):
+                raise ValueError("Trường 'defaults' trong JSON phải là một đối tượng.")
+            defaults = defaults_value
             if payload.get("project"):
                 defaults["project"] = payload["project"]
+            raw = next((payload[key] for key in ("scenes", "shots", "items", "data") if key in payload), None)
+            if raw is None and isinstance(payload.get("scene"), dict):
+                raw = [payload["scene"]]
+            if raw is None and any(key in payload for key in ("prompt", "image_prompt", "video_prompt")):
+                raw = [payload]
+            if not isinstance(raw, list):
+                raise ValueError("JSON phải chứa một danh sách trong 'scenes', 'shots', 'items' hoặc 'data'.")
         else:
-            raise ValueError("JSON phải là danh sách cảnh hoặc đối tượng có trường 'scenes'.")
+            raise ValueError("JSON phải là danh sách cảnh hoặc một đối tượng cảnh.")
     elif suffix in {".jsonl", ".ndjson"}:
         raw = [json.loads(line) for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
     elif suffix in {".csv", ".tsv"}:
@@ -88,8 +216,26 @@ def read_scenes(path: Path) -> tuple[list[Scene], dict[str, Any]]:
         with path.open("r", encoding="utf-8-sig", newline="") as fh:
             raw = list(csv.DictReader(fh, delimiter=delimiter))
     else:
-        raw = [{"prompt": line.strip()} for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+        text = path.read_text(encoding="utf-8-sig")
+        raw = _structured_text_scenes(text)
+        if not raw:
+            raw = [{"prompt": line.strip()} for line in text.splitlines() if line.strip()]
 
+    shared_reference_values: list[str] = []
+    for source in [defaults, *raw]:
+        if not isinstance(source, dict):
+            continue
+        values = source.get("references", source.get("reference_images", [])) or []
+        if isinstance(values, str):
+            values = [part.strip() for part in values.split(",") if part.strip()]
+        if not isinstance(values, list):
+            raise ValueError("Ảnh tham chiếu dùng chung phải là danh sách đường dẫn.")
+        for value in values:
+            value_text = str(value).strip()
+            if value_text and value_text not in shared_reference_values:
+                shared_reference_values.append(value_text)
+
+    shared_references = [str((path.parent / value).resolve()) for value in shared_reference_values]
     scenes: list[Scene] = []
     for index, item in enumerate(raw, 1):
         if not isinstance(item, dict) or not str(item.get("prompt") or item.get("image_prompt") or item.get("video_prompt") or "").strip():
@@ -97,16 +243,11 @@ def read_scenes(path: Path) -> tuple[list[Scene], dict[str, Any]]:
         merged = {**defaults, **item}
         image_prompt = str(merged.get("image_prompt") or merged.get("prompt") or "").strip()
         video_prompt = str(merged.get("video_prompt") or merged.get("prompt") or image_prompt).strip()
-        references = merged.get("references", merged.get("reference_images", [])) or []
-        if isinstance(references, str):
-            references = [part.strip() for part in references.split(",") if part.strip()]
-        if not isinstance(references, list):
-            raise ValueError(f"Cảnh {index} có 'references' không phải danh sách ảnh.")
         scenes.append(Scene(
             id=str(merged.get("id") or f"scene-{index:03d}"), image_prompt=image_prompt, video_prompt=video_prompt,
             aspect=str(merged.get("aspect", "") or ""),
             project=str(merged.get("project", "") or ""),
-            references=[str((path.parent / str(value)).resolve()) for value in references if str(value).strip()],
+            references=shared_references.copy(),
         ))
     if not scenes:
         raise ValueError("Tệp không có cảnh nào.")
@@ -114,13 +255,28 @@ def read_scenes(path: Path) -> tuple[list[Scene], dict[str, Any]]:
 
 
 class GflowRunner:
-    def __init__(self, emit: Callable[[str, str], None], is_cancelled: Callable[[], bool]) -> None:
+    def __init__(self, emit: Callable[[str, str], None], is_cancelled: Callable[[], bool], error_log: Path | None = None) -> None:
         self.emit, self.is_cancelled = emit, is_cancelled
         self.process: subprocess.Popen[str] | None = None
+        self.error_log = error_log
+
+    def _write_error_log(self, level: str, message: str):
+        if not self.error_log:
+            return
+        self.error_log.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.error_log.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] [{level}] {message}\n")
 
     def image_command(self, scene: Scene, output_dir: Path, global_values: dict[str, str]) -> list[str]:
         executable = shutil.which("gflow") or "gflow"
-        command = [executable, "image", "t2i", scene.image_prompt, "--model", "nano2", "--aspect", scene.aspect or global_values["aspect"], "-n", "1"]
+        command_name = "i2i" if scene.references else "t2i"
+        if len(scene.references) > MAX_I2I_REFERENCES:
+            raise ValueError(
+                f"Scene {scene.id} có {len(scene.references)} ảnh tham chiếu; "
+                f"Nano Banana 2 chỉ nhận tối đa {MAX_I2I_REFERENCES} ảnh mỗi lần."
+            )
+        command = [executable, "image", command_name, scene.image_prompt, "--model", "nano2", "--aspect", scene.aspect or global_values["aspect"], "-n", "1"]
         for reference in scene.references:
             reference_path = Path(reference).expanduser()
             if not reference_path.is_file():
@@ -147,7 +303,9 @@ class GflowRunner:
         return [executable, "project", "create", "--title", title, "--json"]
 
     def run_command(self, cmd: list[str]) -> tuple[bool, str, list[str]]:
-        self.emit("INFO", "Lệnh: " + subprocess.list2cmdline(cmd))
+        command_text = "Lệnh: " + subprocess.list2cmdline(cmd)
+        self.emit("INFO", command_text)
+        self._write_error_log("INFO", command_text)
         output_lines: list[str] = []
         try:
             # gflow-cli currently has Windows builds that cannot encode non-ASCII CWD/output paths.
@@ -155,18 +313,27 @@ class GflowRunner:
             self.process = subprocess.Popen(cmd, cwd=Path(tempfile.gettempdir()), text=True, stdout=subprocess.PIPE,
                                             stderr=subprocess.STDOUT, encoding="utf-8", errors="replace")
         except FileNotFoundError:
-            return False, "Không tìm thấy lệnh gflow. Hãy cài: python -m pip install -U gflow-cli", output_lines
+            error = "Không tìm thấy lệnh gflow. Hãy cài: python -m pip install -U gflow-cli"
+            self._write_error_log("ERROR", error)
+            return False, error, output_lines
         assert self.process.stdout
         for line in self.process.stdout:
             output_lines.append(line.rstrip())
             self.emit("CLI", line.rstrip())
+            self._write_error_log("CLI", line.rstrip())
             if self.is_cancelled() and self.process.poll() is None:
                 self.process.terminate()
         code = self.process.wait()
         self.process = None
         if self.is_cancelled():
-            return False, "Đã dừng bởi người dùng", output_lines
-        return code == 0, "" if code == 0 else f"gflow kết thúc với mã {code}", output_lines
+            error = "Đã dừng bởi người dùng"
+            self._write_error_log("ERROR", error)
+            return False, error, output_lines
+        last_output = next((line for line in reversed(output_lines) if line.strip()), "")
+        error = "" if code == 0 else f"gflow kết thúc với mã {code}" + (f": {last_output}" if last_output else "")
+        if error:
+            self._write_error_log("ERROR", error)
+        return code == 0, error, output_lines
 
     def ensure_authenticated(self) -> tuple[bool, str]:
         """Check the saved Flow session and launch the official gflow login flow if needed."""

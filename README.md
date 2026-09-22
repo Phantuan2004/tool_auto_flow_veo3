@@ -52,7 +52,35 @@ Không cần chạy trực tiếp `gflow_veo_batcher.py`; file đó giữ phần
 
 ## Định dạng tệp cảnh
 
-Hỗ trợ JSON, JSONL/NDJSON, CSV/TSV, hoặc TXT (một prompt trên mỗi dòng). Các trường dùng được:
+Hỗ trợ JSON, JSONL/NDJSON, CSV/TSV, TXT và Markdown. TXT/Markdown có thể là một prompt trên mỗi dòng hoặc dạng kịch bản có cấu trúc gần JSON như sau:
+
+```text
+Phân cảnh 49 (Nhân vật hoạt hình 3D): Trong phòng tắm gia đình...
+
+**Phong cách hình ảnh:** 3D style animation, highly detailed.
+**Bối cảnh:** Trong nhà, bồn tắm đầy nước.
+**Chỉ đạo quay & Chuyển động:**
+- **Góc quay:** Cận cảnh Henry chà lưng cho Dad.
+**Lời thoại:**
+- **Henry:** "Scrub back! Big back!"
+**Negative Prompt:** No logos, no subtitles, no watermark.
+```
+
+Mỗi tiêu đề `Phân cảnh N` tạo thành một scene. Ứng dụng tự ghép mô tả, phong cách, ánh sáng, bối cảnh, trang phục, nhân vật và biểu cảm vào prompt ảnh; chỉ đạo quay, chuyển động và lời thoại được thêm vào prompt video. Các phần không có trong mẫu vẫn được chấp nhận.
+
+Với JSON, các trường dùng được:
+
+Với JSON, danh sách phân cảnh có thể đặt trực tiếp dưới dạng mảng hoặc trong một trong các khóa `scenes`, `shots`, `items`, `data`. File chỉ có một cảnh cũng được hỗ trợ nếu là object chứa `prompt`, `image_prompt` hoặc `video_prompt`, hoặc đặt object đó trong khóa `scene`. Ví dụ tối thiểu:
+
+```json
+{
+	"defaults": {"aspect": "16:9"},
+	"shots": [
+		{"id": "intro", "prompt": "A cinematic opening shot"},
+		{"id": "close-up", "image_prompt": "A detailed close-up", "video_prompt": "Slow camera push-in"}
+	]
+}
+```
 
 | Trường | Bắt buộc | Mô tả |
 |---|---:|---|
@@ -88,16 +116,19 @@ Ví dụ JSON:
 }
 ```
 
-Trong giao diện, chọn scene rồi nhấn **+ Thêm ảnh** để chọn nhiều ảnh tham chiếu một lần. Các ảnh được truyền vào lệnh tạo ảnh dưới dạng nhiều cờ `--ref`; nếu một file không tồn tại, scene sẽ lỗi trước khi gửi request để tránh tạo sai hình.
+Trong giao diện, chọn scene rồi nhấn **+ Thêm ảnh** để chọn nhiều ảnh tham chiếu một lần. Bộ ảnh tham chiếu của file/batch được dùng chung cho mọi scene, vì vậy tất cả các phân cảnh đều nhận cùng toàn bộ ảnh gốc khi tạo ảnh. Các ảnh được truyền vào lệnh tạo ảnh dưới dạng nhiều cờ `--ref`; nếu một file không tồn tại, scene sẽ lỗi trước khi gửi request để tránh tạo sai hình. Thay đổi danh sách ảnh trong giao diện cũng được đồng bộ cho toàn bộ scene.
 
 ## Lệnh mà app thực thi
 
 Mỗi cảnh được chạy theo thứ tự:
 
 ```text
-gflow image t2i "IMAGE_PROMPT" --model nano2 --aspect 16:9 -n 1 --ref assets/minh.png --ref assets/motorbike.png --out output/scene-001/image
+gflow image i2i "IMAGE_PROMPT" --model nano2 --aspect 16:9 -n 1 --ref assets/minh.png --ref assets/motorbike.png --project FLOW_PROJECT_ID --out output/scene-001/image
 gflow video i2v --initial-frame FLOW_IMAGE_MEDIA_UUID "VIDEO_PROMPT" --project FLOW_PROJECT_ID --model omni-flash --duration 8 --aspect 16:9 --count 1 --out-dir output/scene-001/video
 ```
+
+Scene không có ảnh tham chiếu vẫn dùng `gflow image t2i`. Scene có ảnh tham chiếu dùng `gflow image i2i`; `gflow-cli` sẽ tải từng đường dẫn local trong các cờ `--ref` lên Flow và dùng các media đó làm reference trong cùng lần tạo ảnh.
+Nano Banana 2 nhận tối đa 10 ảnh tham chiếu cho một scene; app sẽ báo lỗi trước khi upload nếu vượt quá giới hạn này.
 
 `gflow-cli` 0.79.0 hiện không có cờ `--resolution`/`--quality` trên `gflow video i2v`, nên không thể tự động nhấn một lựa chọn “720p” riêng trong giao diện Flow. Video I2V native của Flow thường được trả về ở mức 720p (theo tỷ lệ `--aspect`); app không gửi một cờ độ phân giải không được CLI hỗ trợ. Nếu log JSON trả về video 360p, đó là giới hạn/cấu hình đang được Flow áp cho tài khoản — hãy kiểm tra model/tier và giao diện Flow trước khi chạy lại.
 
@@ -109,3 +140,5 @@ CLI phát triển khá nhanh; khi một tham số bị bản `gflow-cli` đang c
 - Không đóng cửa sổ trình duyệt Flow mà CLI dùng trong khi một cảnh đang chạy.
 - App không tự retry để tránh tạo ảnh/video hoặc tiêu credit ngoài ý muốn. Cảnh lỗi có thể chạy lại bằng lần batch mới.
 - Trên Windows, một số bản `gflow-cli` lỗi `UnicodeEncodeError` khi `--out` chứa dấu tiếng Việt. App chạy CLI trong thư mục tạm ASCII rồi chép video hoàn tất về thư mục output bạn chọn, vì thế bạn vẫn có thể chọn đường dẫn tiếng Việt.
+- Toàn bộ lệnh, output CLI và lỗi trong quá trình đăng nhập, tạo project, tạo ảnh hoặc tạo video được ghi nối tiếp vào `output/_logs/gflow_errors.log` của thư mục output đang chọn.
+- Nếu cài `ffmpeg` và có trong `PATH`, app tự remux MP4/MOV với `+faststart` trước khi chép ra output để tăng khả năng phát trên Windows. Không có `ffmpeg`, app vẫn giữ video gốc và ghi cảnh báo vào log.
