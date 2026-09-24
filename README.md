@@ -32,7 +32,7 @@ gflow auth status
 
 Nút **Kiểm tra gflow** chỉ kiểm tra phiên bản CLI, không thực hiện đăng nhập.
 
-Nút **Đăng nhập Flow** luôn chạy `gflow auth login` và mở trình duyệt để bạn chọn hoặc chuyển sang tài khoản Google Flow/Veo khác. Có thể dùng nút này trước khi tạo batch; nếu chưa đăng nhập, bước tạo ảnh/video vẫn tự mở luồng đăng nhập như trước.
+Nút **Đăng nhập Flow** luôn chạy `gflow auth login` và mở trình duyệt để bạn chọn hoặc chuyển sang tài khoản Google Flow/Veo khác. Có thể dùng nút này trước khi tạo batch; nếu chưa đăng nhập, bước tạo ảnh/video vẫn tự mở luồng đăng nhập như trước. Nút **Đăng xuất Flow** xóa profile và cookie Flow hiện tại sau khi xác nhận; Project ID trong giao diện cũng được xóa để tránh dùng nhầm project của tài khoản cũ.
 
 ## Chạy ứng dụng
 

@@ -260,6 +260,11 @@ class GflowRunner:
         self.process: subprocess.Popen[str] | None = None
         self.error_log = error_log
 
+    @staticmethod
+    def gflow_command(*args: str) -> list[str]:
+        """Run gflow through this interpreter so venv paths with Unicode stay valid."""
+        return [sys.executable, "-m", "gflow_cli.cli", *args]
+
     def _write_error_log(self, level: str, message: str):
         if not self.error_log:
             return
@@ -269,14 +274,13 @@ class GflowRunner:
             handle.write(f"[{timestamp}] [{level}] {message}\n")
 
     def image_command(self, scene: Scene, output_dir: Path, global_values: dict[str, str]) -> list[str]:
-        executable = shutil.which("gflow") or "gflow"
         command_name = "i2i" if scene.references else "t2i"
         if len(scene.references) > MAX_I2I_REFERENCES:
             raise ValueError(
                 f"Scene {scene.id} có {len(scene.references)} ảnh tham chiếu; "
                 f"Nano Banana 2 chỉ nhận tối đa {MAX_I2I_REFERENCES} ảnh mỗi lần."
             )
-        command = [executable, "image", command_name, scene.image_prompt, "--model", "nano2", "--aspect", scene.aspect or global_values["aspect"], "-n", "1"]
+        command = self.gflow_command("image", command_name, scene.image_prompt, "--model", "nano2", "--aspect", scene.aspect or global_values["aspect"], "-n", "1")
         for reference in scene.references:
             reference_path = Path(reference).expanduser()
             if not reference_path.is_file():
@@ -290,17 +294,15 @@ class GflowRunner:
         return command
 
     def video_command(self, scene: Scene, initial_frame: str, output_dir: Path, global_values: dict[str, str]) -> list[str]:
-        executable = shutil.which("gflow") or "gflow"
-        command = [executable, "video", "i2v", "--initial-frame", initial_frame, scene.video_prompt,
-                   "--model", "omni-flash", "--duration", "8", "--aspect", scene.aspect or global_values["aspect"], "--count", "1"]
+        command = self.gflow_command("video", "i2v", "--initial-frame", initial_frame, scene.video_prompt,
+                   "--model", "omni-flash", "--duration", "8", "--aspect", scene.aspect or global_values["aspect"], "--count", "1")
         project = global_values["project"]
         if project:
             command += ["--project", project]
         return command + ["--out-dir", str(output_dir), "--json"]
 
     def project_command(self, title: str) -> list[str]:
-        executable = shutil.which("gflow") or "gflow"
-        return [executable, "project", "create", "--title", title, "--json"]
+        return self.gflow_command("project", "create", "--title", title, "--json")
 
     def run_command(self, cmd: list[str]) -> tuple[bool, str, list[str]]:
         command_text = "Lệnh: " + subprocess.list2cmdline(cmd)
@@ -337,9 +339,8 @@ class GflowRunner:
 
     def ensure_authenticated(self) -> tuple[bool, str]:
         """Check the saved Flow session and launch the official gflow login flow if needed."""
-        executable = shutil.which("gflow") or "gflow"
         self.emit("INFO", "Kiểm tra profile đăng nhập Google Flow…")
-        authenticated, _, _ = self.run_command([executable, "auth", "status"])
+        authenticated, _, _ = self.run_command(self.gflow_command("auth", "status"))
         if authenticated:
             self.emit("INFO", "Đã tìm thấy profile gflow hợp lệ.")
             return True, ""
@@ -347,16 +348,21 @@ class GflowRunner:
             return False, "Đã dừng bởi người dùng"
         self.emit("INFO", "Chưa có profile. Đang mở trình duyệt để đăng nhập Google Flow…")
         self.emit("INFO", "Trong cửa sổ trình duyệt, đăng nhập tài khoản có quyền Flow/Veo rồi hoàn tất bước xác nhận.")
-        logged_in, error, _ = self.run_command([executable, "auth", "login"])
+        logged_in, error, _ = self.run_command(self.gflow_command("auth", "login"))
         return logged_in, error
 
     def login(self) -> tuple[bool, str]:
         """Always launch the official login flow so the user can choose an account."""
-        executable = shutil.which("gflow") or "gflow"
         self.emit("INFO", "Đang mở trình duyệt để đăng nhập/chuyển tài khoản Google Flow…")
         self.emit("INFO", "Trong cửa sổ trình duyệt, chọn tài khoản Flow/Veo muốn sử dụng rồi hoàn tất xác nhận.")
-        return_code, error, _ = self.run_command([executable, "auth", "login"])
+        return_code, error, _ = self.run_command(self.gflow_command("auth", "login"))
         return return_code, error
+
+    def logout(self) -> tuple[bool, str]:
+        """Delete the active saved Flow profile without an interactive prompt."""
+        self.emit("INFO", "Đang đăng xuất profile Google Flow hiện tại…")
+        success, error, _ = self.run_command(self.gflow_command("auth", "logout", "--yes"))
+        return success, error
 
     def create_project(self, title: str) -> tuple[str | None, str]:
         ok, error, lines = self.run_command(self.project_command(title))
@@ -514,7 +520,7 @@ class App(ttk.Frame):
     def check_gflow(self) -> None:
         def worker() -> None:
             try:
-                result = subprocess.run([shutil.which("gflow") or "gflow", "--version"], text=True, capture_output=True, encoding="utf-8", errors="replace", timeout=20)
+                result = subprocess.run(GflowRunner.gflow_command("--version"), text=True, capture_output=True, encoding="utf-8", errors="replace", timeout=20)
                 self.events.put(("log", ("INFO" if result.returncode == 0 else "ERROR", (result.stdout or result.stderr).strip())))
             except Exception as exc: self.events.put(("log", ("ERROR", f"Không kiểm tra được gflow: {exc}")))
         threading.Thread(target=worker, daemon=True).start()

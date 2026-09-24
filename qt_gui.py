@@ -195,15 +195,16 @@ class AuthWorker(QObject):
     log = Signal(str, str)
     finished = Signal(bool, str)
 
-    def __init__(self):
+    def __init__(self, action: str):
         super().__init__()
+        self.action = action
         self.cancelled = False
         self.runner: GflowRunner | None = None
 
     @Slot()
     def run(self):
         self.runner = GflowRunner(self._emit_log, lambda: self.cancelled)
-        success, error = self.runner.login()
+        success, error = self.runner.login() if self.action == "login" else self.runner.logout()
         self.finished.emit(success, error)
 
     def stop(self):
@@ -297,6 +298,9 @@ class FlowStudio(QMainWindow):
         self.login_action = QAction("Đăng nhập Flow", self)
         self.login_action.triggered.connect(self.login_flow)
         toolbar.addAction(self.login_action)
+        self.logout_action = QAction("Đăng xuất Flow", self)
+        self.logout_action.triggered.connect(self.logout_flow)
+        toolbar.addAction(self.logout_action)
         toolbar.addSeparator()
         self.run_images_action = QAction("Tạo ảnh", self)
         self.run_images_action.triggered.connect(lambda: self.start_run("image"))
@@ -515,13 +519,13 @@ class FlowStudio(QMainWindow):
         self.save_current_prompts()
 
     def check_gflow(self):
-        result = subprocess.run([shutil.which("gflow") or "gflow", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        result = subprocess.run(GflowRunner.gflow_command("--version"), capture_output=True, text=True, encoding="utf-8", errors="replace")
         self.log_message("INFO" if result.returncode == 0 else "ERROR", (result.stdout or result.stderr).strip())
 
     def login_flow(self):
         if self.worker:
             return
-        self.worker = AuthWorker()
+        self.worker = AuthWorker("login")
         self.thread = QThread(self)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
@@ -534,6 +538,32 @@ class FlowStudio(QMainWindow):
         self._set_actions_enabled(False)
         self.stop_action.setEnabled(True)
         self.status.showMessage("Đang chờ đăng nhập Google Flow...")
+
+    def logout_flow(self):
+        if self.worker:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Đăng xuất Flow",
+            "Xóa phiên đăng nhập Google Flow hiện tại và Project ID đang dùng?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.worker = AuthWorker("logout")
+        self.thread = QThread(self)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.log.connect(self.log_message)
+        self.worker.finished.connect(self.logout_finished)
+        self.worker.finished.connect(self.thread.quit)
+        self.thread.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.start()
+        self._set_actions_enabled(False)
+        self.stop_action.setEnabled(True)
+        self.status.showMessage("Đang đăng xuất Google Flow...")
 
     def start_run(self, phase: str):
         if self.worker or not self.scenes:
@@ -575,6 +605,7 @@ class FlowStudio(QMainWindow):
     def _set_actions_enabled(self, enabled: bool):
         self.check_action.setEnabled(enabled)
         self.login_action.setEnabled(enabled)
+        self.logout_action.setEnabled(enabled)
         self.run_images_action.setEnabled(enabled)
         self.run_videos_action.setEnabled(enabled)
 
@@ -586,6 +617,20 @@ class FlowStudio(QMainWindow):
         else:
             self.log_message("ERROR", error or "Đăng nhập Google Flow thất bại.")
             self.status.showMessage("Đăng nhập thất bại")
+        self.worker = None
+        self.thread = None
+        self.stop_action.setEnabled(False)
+        self._set_actions_enabled(True)
+
+    @Slot(bool, str)
+    def logout_finished(self, success: bool, error: str):
+        if success:
+            self.project_edit.clear()
+            self.log_message("INFO", "Đã đăng xuất và xóa phiên Google Flow.")
+            self.status.showMessage("Đã đăng xuất Google Flow")
+        else:
+            self.log_message("ERROR", error or "Đăng xuất Google Flow thất bại.")
+            self.status.showMessage("Đăng xuất thất bại")
         self.worker = None
         self.thread = None
         self.stop_action.setEnabled(False)
