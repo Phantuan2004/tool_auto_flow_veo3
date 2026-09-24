@@ -38,8 +38,11 @@ Nút **Đăng nhập Flow** luôn chạy `gflow auth login` và mở trình duy�
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-python .\main.py
+python -m py_hot_reload --ignore-venv-and-python-lib .\main.py
 ```
+
+Lệnh trên sẽ tự khởi động lại ứng dụng khi bạn sửa mã nguồn. Khi cần chạy một
+lần để kiểm tra nhanh, vẫn có thể dùng `python .\main.py`.
 
 Giao diện mới chia thành hai cột:
 
