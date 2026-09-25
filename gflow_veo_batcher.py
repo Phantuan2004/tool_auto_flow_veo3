@@ -141,13 +141,33 @@ class Scene:
 
 def _structured_text_scenes(text: str) -> list[dict[str, Any]]:
     """Parse Markdown-like scene blocks headed by ``Phân cảnh N``."""
-    heading_pattern = re.compile(r"(?im)^\s*(?:#{1,6}\s*)?Phân\s+cảnh\s+([^\r\n]+)")
+    heading_pattern = re.compile(
+        r"(?im)^\s*(?:[*#-]\s*)?(?:\*\*)?\s*Phân\s+cảnh\s+([^\r\n*]+?)(?:\*\*)?\s*$"
+    )
     matches = list(heading_pattern.finditer(text))
     if not matches:
         return []
 
-    section_pattern = re.compile(r"(?im)^\s*\*\*([^*\r\n]+):\*\*[ \t]*([^\r\n]*)")
+    section_pattern = re.compile(
+        r"(?im)^\s*(?:[*-]\s*)?(?:\*\*)?([^:\r\n*]+?)\s*:\s*(?:\*\*)?\s*(.*)$"
+    )
     scenes: list[dict[str, Any]] = []
+    section_aliases = {
+        "phong cách": "phong cách hình ảnh",
+        "phong cách hình ảnh": "phong cách hình ảnh",
+        "ánh sáng": "ánh sáng tổng thể",
+        "ánh sáng tổng thể": "ánh sáng tổng thể",
+        "bối cảnh": "bối cảnh",
+        "nhân vật xuất hiện": "trang phục và hành động nhân vật",
+        "hành động": "trang phục và hành động nhân vật",
+        "góc quay": "chỉ đạo quay & chuyển động",
+        "chỉ đạo quay & chuyển động": "chỉ đạo quay & chuyển động",
+        "lời thoại": "lời thoại",
+        "lời thoại nhân vật": "lời thoại",
+        "biểu cảm": "biểu cảm của từng nhân vật",
+        "biểu cảm của từng nhân vật": "biểu cảm của từng nhân vật",
+        "negative prompt": "negative prompt",
+    }
     for index, match in enumerate(matches, 1):
         block = text[match.end():matches[index].start() if index < len(matches) else len(text)].strip()
         title = match.group(1).strip()
@@ -158,11 +178,13 @@ def _structured_text_scenes(text: str) -> list[dict[str, Any]]:
         intro = block[:section_matches[0].start()].strip() if section_matches else block
         for section_index, section_match in enumerate(section_matches):
             end = section_matches[section_index + 1].start() if section_index + 1 < len(section_matches) else len(block)
-            inline_content = section_match.group(2).strip()
-            following_content = block[section_match.end():end].strip()
-            sections[section_match.group(1).strip().lower()] = "\n".join(
-                part for part in (inline_content, following_content) if part
+            key = section_match.group(1).strip().lower()
+            value = "\n".join(
+                part for part in (section_match.group(2).strip(), block[section_match.end():end].strip()) if part
             )
+            normalized_key = section_aliases.get(key, key)
+            if normalized_key not in sections or not sections[normalized_key]:
+                sections[normalized_key] = value
 
         image_parts = [f"Phân cảnh {title}", intro]
         for name in ("phong cách hình ảnh", "ánh sáng tổng thể", "bối cảnh", "trang phục và hành động nhân vật", "biểu cảm của từng nhân vật"):
