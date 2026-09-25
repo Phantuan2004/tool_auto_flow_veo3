@@ -284,6 +284,20 @@ class FlowStudio(QMainWindow):
         self._apply_theme()
         self.load_scene_file(str(APP_DIR / "scene_template.json"))
 
+    def closeEvent(self, event):
+        if self.worker and self.thread and self.thread.isRunning():
+            self.worker.stop()
+            self.status.showMessage("Đang dừng tác vụ trước khi đóng ứng dụng...")
+            if not self.thread.wait(5000):
+                QMessageBox.warning(
+                    self,
+                    "Chưa thể đóng ứng dụng",
+                    "Tác vụ Flow vẫn đang chạy. Hãy chờ tác vụ dừng rồi đóng lại.",
+                )
+                event.ignore()
+                return
+        event.accept()
+
     def _build_ui(self):
         toolbar = QToolBar()
         toolbar.setMovable(False)

@@ -37,12 +37,14 @@ Nút **Đăng nhập Flow** luôn chạy `gflow auth login` và mở trình duy�
 ## Chạy ứng dụng
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python -m py_hot_reload --ignore-venv-and-python-lib .\main.py
+.\.venv\Scripts\python.exe -m py_hot_reload --ignore-patterns "*/site-packages/*" main.py
 ```
 
-Lệnh trên sẽ tự khởi động lại ứng dụng khi bạn sửa mã nguồn. Khi cần chạy một
-lần để kiểm tra nhanh, vẫn có thể dùng `python .\main.py`.
+Lệnh trên dùng trực tiếp Python trong `.venv`, nên không phụ thuộc vào việc
+PowerShell đã activate môi trường hay chưa. `py-hot-reload` đã bỏ qua thư viện
+chuẩn Python mặc định; mẫu `*/site-packages/*` giúp bỏ qua các gói cài trong
+môi trường. Khi cần chạy một lần để kiểm tra nhanh, vẫn có thể dùng
+`.\.venv\Scripts\python.exe .\main.py`.
 
 Giao diện mới chia thành hai cột:
 
