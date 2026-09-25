@@ -280,23 +280,39 @@ class FlowStudio(QMainWindow):
         self.events = queue.Queue()
         self.setWindowTitle("GFlow Veo Batch Studio")
         self.resize(1440, 900)
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._shutdown_threads)
         self._build_ui()
         self._apply_theme()
         self.load_scene_file(str(APP_DIR / "scene_template.json"))
 
     def closeEvent(self, event):
-        if self.worker and self.thread and self.thread.isRunning():
-            self.worker.stop()
-            self.status.showMessage("Đang dừng tác vụ trước khi đóng ứng dụng...")
-            if not self.thread.wait(5000):
-                QMessageBox.warning(
-                    self,
-                    "Chưa thể đóng ứng dụng",
-                    "Tác vụ Flow vẫn đang chạy. Hãy chờ tác vụ dừng rồi đóng lại.",
-                )
-                event.ignore()
-                return
+        if not self._shutdown_threads():
+            QMessageBox.warning(
+                self,
+                "Chưa thể đóng ứng dụng",
+                "Tác vụ Flow vẫn đang chạy. Hãy chờ tác vụ dừng rồi đóng lại.",
+            )
+            event.ignore()
+            return
         event.accept()
+
+    def _shutdown_threads(self) -> bool:
+        if self.worker is not None:
+            self.worker.stop()
+        if self.thread is not None and self.thread.isRunning():
+            self.thread.quit()
+            if not self.thread.wait(5000):
+                self.thread.terminate()
+                return self.thread.wait(2000)
+        if self.worker is not None:
+            self.worker.deleteLater()
+        if self.thread is not None:
+            self.thread.deleteLater()
+        self.worker = None
+        self.thread = None
+        return True
 
     def _build_ui(self):
         toolbar = QToolBar()
